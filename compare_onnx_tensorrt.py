@@ -123,8 +123,8 @@ def compare_models():
     plt.title('Model Memory Usage')
 
     plt.subplot(2, 3, 5)
-    plt.bar(labels, gpu, color=['blue', 'cyan', 'orange', 'red'])
-    plt.ylabel('Jetson GPU Usage (%)')
+if __name__ == "__main__":
+    compare_models()
     plt.title('Jetson GPU Usage')
 
     plt.subplot(2, 3, 6)
