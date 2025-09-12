@@ -1,0 +1,65 @@
+# Ignore Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore model files
+models/*.onnx
+models/*.engine
+models/*.pth
+
+# Ignore dataset and image data
+kitti_data/*
+kitti_data/**/*.png
+kitti_data/**/*.jpg
+kitti_data/**/*.jpeg
+kitti_data/**/*.npz
+kitti_data/**/*.npy
+kitti_data/**/*.txt
+
+# Ignore splits and benchmark files
+splits/**/*.npy
+splits/**/*.npz
+splits/**/*.txt
+
+# Ignore logs and outputs
+*.log
+*.out
+*.tmp
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore environment and dependency folders
+venv/
+.env/
+*.env
+
+# Ignore Jetson stats and jtop cache
+~/.jtop/
+
+# Ignore test results
+*.xml
+*.html
+
+# Ignore large files
+*.tar
+*.zip
+*.gz
+*.tar.gz
+*.tar.bz2
+*.h5
+*.ckpt
+
+# Ignore TensorRT build files
+*.trt
+*.plan
+
+# Ignore miscellaneous
+*.swp
+*.swo
