@@ -3,15 +3,7 @@
 Compare original and quantized ONNX models using TensorRT on Jetson Nano TX2.
 Measures inference latency, throughput, and memory usage for both encoder and depth models.
 """
-import os
-import time
-import numpy as np
-import cv2
-import psutil
-import onnx
-import tensorrt as trt
-import pycuda.driver as cuda
-import pycuda.autoinit
+import matplotlib.pyplot as plt
 try:
     from jtop import jtop
     JTOP_AVAILABLE = True
@@ -112,6 +104,14 @@ def compare_models():
     input_shape = orig_encoder_engine.get_binding_shape(0)
     img = preprocess_image(SAMPLE_IMAGE, input_shape)
 
+    # Store metrics for plotting
+    metrics = {
+        'Original Encoder': {},
+        'Original Depth': {},
+        'Quantized Encoder': {},
+        'Quantized Depth': {}
+    }
+
     print("Evaluating original models...")
     mem_before = get_memory_usage()
     jetson_before = get_jetson_metrics()
@@ -119,6 +119,22 @@ def compare_models():
     depth_lat, depth_thr = run_inference(orig_depth_engine, img)
     mem_after = get_memory_usage()
     jetson_after = get_jetson_metrics()
+    metrics['Original Encoder'] = {
+        'Latency': enc_lat * 1000,
+        'FPS': enc_thr,
+        'Throughput': enc_thr,
+        'Mem': mem_after - mem_before,
+        'GPU': jetson_after['gpu'],
+        'RAM': jetson_after['ram']
+    }
+    metrics['Original Depth'] = {
+        'Latency': depth_lat * 1000,
+        'FPS': depth_thr,
+        'Throughput': depth_thr,
+        'Mem': mem_after - mem_before,
+        'GPU': jetson_after['gpu'],
+        'RAM': jetson_after['ram']
+    }
     print(f"Original Encoder: Latency={enc_lat*1000:.2f}ms, FPS={enc_thr:.2f}, Throughput={enc_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
     print(f"Original Depth: Latency={depth_lat*1000:.2f}ms, FPS={depth_thr:.2f}, Throughput={depth_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
 
@@ -129,11 +145,60 @@ def compare_models():
     depth_lat, depth_thr = run_inference(quant_depth_engine, img)
     mem_after = get_memory_usage()
     jetson_after = get_jetson_metrics()
+    metrics['Quantized Encoder'] = {
+        'Latency': enc_lat * 1000,
+        'FPS': enc_thr,
+        'Throughput': enc_thr,
+        'Mem': mem_after - mem_before,
+        'GPU': jetson_after['gpu'],
+        'RAM': jetson_after['ram']
+    }
+    metrics['Quantized Depth'] = {
+        'Latency': depth_lat * 1000,
+        'FPS': depth_thr,
+        'Throughput': depth_thr,
+        'Mem': mem_after - mem_before,
+        'GPU': jetson_after['gpu'],
+        'RAM': jetson_after['ram']
+    }
     print(f"Quantized Encoder: Latency={enc_lat*1000:.2f}ms, FPS={enc_thr:.2f}, Throughput={enc_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
     print(f"Quantized Depth: Latency={depth_lat*1000:.2f}ms, FPS={depth_thr:.2f}, Throughput={depth_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
 
     if not JTOP_AVAILABLE:
         print("Note: jtop is not installed. Jetson GPU/RAM metrics will not be shown. Install with 'pip install jetson-stats' on your Jetson device.")
+
+    # Plotting
+    labels = list(metrics.keys())
+    latency = [metrics[k]['Latency'] for k in labels]
+    fps = [metrics[k]['FPS'] for k in labels]
+    mem = [metrics[k]['Mem'] for k in labels]
+    gpu = [metrics[k]['GPU'] if metrics[k]['GPU'] is not None else 0 for k in labels]
+    ram = [metrics[k]['RAM'] if metrics[k]['RAM'] is not None else 0 for k in labels]
+
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 2, 1)
+    plt.bar(labels, latency, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('Latency (ms)')
+    plt.title('Model Latency Comparison')
+
+    plt.subplot(2, 2, 2)
+    plt.bar(labels, fps, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('FPS')
+    plt.title('Model FPS Comparison')
+
+    plt.subplot(2, 2, 3)
+    plt.bar(labels, mem, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('Memory Usage (MB)')
+    plt.title('Model Memory Usage')
+
+    plt.subplot(2, 2, 4)
+    plt.bar(labels, gpu, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('GPU Usage (%)')
+    plt.title('Jetson GPU Usage')
+
+    plt.tight_layout()
+    plt.savefig('model_comparison_metrics.png')
+    plt.show()
 
 if __name__ == "__main__":
     compare_models()
