@@ -9,6 +9,15 @@ try:
     JTOP_AVAILABLE = True
 except ImportError:
     JTOP_AVAILABLE = False
+import os
+import time
+import numpy as np
+import cv2
+import psutil
+import onnx
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit
 
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 
