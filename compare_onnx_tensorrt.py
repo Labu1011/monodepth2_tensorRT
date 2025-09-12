@@ -14,12 +14,7 @@ import time
 import numpy as np
 import cv2
 import psutil
-import onnx
-import tensorrt as trt
-import pycuda.driver as cuda
-import pycuda.autoinit
-
-TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+import onnxruntime as ort
 
 # Paths to models
 ORIG_ENCODER = 'models/encoder.onnx'
@@ -30,51 +25,27 @@ QUANT_DEPTH = 'models/depth_quantized.onnx'
 # Sample image path (change if needed)
 SAMPLE_IMAGE = 'kitti_data/2011_09_26_drive_0035_sync/image_00/data/0000000000.png'
 
-# Helper to build TensorRT engine from ONNX
-def build_engine(onnx_path):
-    with open(onnx_path, 'rb') as f:
-        onnx_model = f.read()
-    builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
-    parser = trt.OnnxParser(network, TRT_LOGGER)
-    if not parser.parse(onnx_model):
-        raise RuntimeError(f"Failed to parse ONNX: {onnx_path}")
-    config = builder.create_builder_config()
-    config.max_workspace_size = 1 << 28  # 256MB
-    engine = builder.build_engine(network, config)
-    return engine
+def preprocess_image(img_path, input_shape):
+    img = cv2.imread(img_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (input_shape[3], input_shape[2]))
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0)
+    return img
 
-# Helper to run inference and measure time
-def run_inference(engine, input_data, n_runs=50):
-    context = engine.create_execution_context()
-    inputs = []
-    outputs = []
-    bindings = []
-    stream = cuda.Stream()
-    for binding in engine:
-        size = trt.volume(engine.get_binding_shape(binding))
-        dtype = trt.nptype(engine.get_binding_dtype(binding))
-        if engine.binding_is_input(binding):
-            input_mem = cuda.mem_alloc(input_data.nbytes)
-            inputs.append(input_mem)
-            bindings.append(int(input_mem))
-        else:
-            output_mem = cuda.mem_alloc(size * np.dtype(dtype).itemsize)
-            outputs.append(output_mem)
-            bindings.append(int(output_mem))
+def run_onnx_inference(model_path, input_data, n_runs=50):
+    session = ort.InferenceSession(model_path)
+    input_name = session.get_inputs()[0].name
     # Warmup
-    cuda.memcpy_htod(inputs[0], input_data)
-    context.execute_v2(bindings)
-    # Timed runs
+    session.run(None, {input_name: input_data})
     start = time.time()
     for _ in range(n_runs):
-        cuda.memcpy_htod(inputs[0], input_data)
-        context.execute_v2(bindings)
-        cuda.memcpy_dtoh(np.empty_like(input_data), outputs[0])
+        session.run(None, {input_name: input_data})
     end = time.time()
     avg_latency = (end - start) / n_runs
-    throughput = n_runs / (end - start)
-    return avg_latency, throughput
+    fps = n_runs / (end - start)
+    return avg_latency, fps
 
 def get_memory_usage():
     process = psutil.Process(os.getpid())
@@ -92,122 +63,89 @@ def get_jetson_metrics():
         return {'gpu': gpu, 'ram': ram}
 
 # Preprocess image for model
-def preprocess_image(img_path, input_shape):
-    img = cv2.imread(img_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (input_shape[3], input_shape[2]))
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, axis=0)
-    return img
-
-# Main comparison function
 def compare_models():
-    print("Building engines...")
-    orig_encoder_engine = build_engine(ORIG_ENCODER)
-    orig_depth_engine = build_engine(ORIG_DEPTH)
-    quant_encoder_engine = build_engine(QUANT_ENCODER)
-    quant_depth_engine = build_engine(QUANT_DEPTH)
-
-    # Get input shape from encoder
-    input_shape = orig_encoder_engine.get_binding_shape(0)
+    # Get input shape from encoder ONNX
+    session = ort.InferenceSession(ORIG_ENCODER)
+    input_shape = session.get_inputs()[0].shape
     img = preprocess_image(SAMPLE_IMAGE, input_shape)
 
-    # Store metrics for plotting
-    metrics = {
-        'Original Encoder': {},
-        'Original Depth': {},
-        'Quantized Encoder': {},
-        'Quantized Depth': {}
-    }
 
-    print("Evaluating original models...")
-    mem_before = get_memory_usage()
-    jetson_before = get_jetson_metrics()
-    enc_lat, enc_thr = run_inference(orig_encoder_engine, img)
-    depth_lat, depth_thr = run_inference(orig_depth_engine, img)
-    mem_after = get_memory_usage()
-    jetson_after = get_jetson_metrics()
-    metrics['Original Encoder'] = {
-        'Latency': enc_lat * 1000,
-        'FPS': enc_thr,
-        'Throughput': enc_thr,
-        'Mem': mem_after - mem_before,
-        'GPU': jetson_after['gpu'],
-        'RAM': jetson_after['ram']
-    }
-    metrics['Original Depth'] = {
-        'Latency': depth_lat * 1000,
-        'FPS': depth_thr,
-        'Throughput': depth_thr,
-        'Mem': mem_after - mem_before,
-        'GPU': jetson_after['gpu'],
-        'RAM': jetson_after['ram']
-    }
-    print(f"Original Encoder: Latency={enc_lat*1000:.2f}ms, FPS={enc_thr:.2f}, Throughput={enc_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
-    print(f"Original Depth: Latency={depth_lat*1000:.2f}ms, FPS={depth_thr:.2f}, Throughput={depth_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
+    metrics = {}
+    for name, path in [
+        ('Original Encoder', ORIG_ENCODER),
+        ('Original Depth', ORIG_DEPTH),
+        ('Quantized Encoder', QUANT_ENCODER),
+        ('Quantized Depth', QUANT_DEPTH)
+    ]:
+        mem_before = get_memory_usage()
+        jetson_before = get_jetson_metrics() if JTOP_AVAILABLE else {'gpu': None, 'ram': None}
+        latency, fps = run_onnx_inference(path, img)
+        mem_after = get_memory_usage()
+        jetson_after = get_jetson_metrics() if JTOP_AVAILABLE else {'gpu': None, 'ram': None}
+        metrics[name] = {
+            'Latency': latency * 1000,
+            'FPS': fps,
+            'Mem': mem_after - mem_before,
+            'GPU': jetson_after['gpu'],
+            'RAM': jetson_after['ram'],
+            'Throughput': fps  # FPS is equivalent to throughput here
+        }
+        print(f"{name}: Latency={latency*1000:.2f}ms, FPS={fps:.2f}, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
 
-    print("Evaluating quantized models...")
-    mem_before = get_memory_usage()
-    jetson_before = get_jetson_metrics()
-    enc_lat, enc_thr = run_inference(quant_encoder_engine, img)
-    depth_lat, depth_thr = run_inference(quant_depth_engine, img)
-    mem_after = get_memory_usage()
-    jetson_after = get_jetson_metrics()
-    metrics['Quantized Encoder'] = {
-        'Latency': enc_lat * 1000,
-        'FPS': enc_thr,
-        'Throughput': enc_thr,
-        'Mem': mem_after - mem_before,
-        'GPU': jetson_after['gpu'],
-        'RAM': jetson_after['ram']
-    }
-    metrics['Quantized Depth'] = {
-        'Latency': depth_lat * 1000,
-        'FPS': depth_thr,
-        'Throughput': depth_thr,
-        'Mem': mem_after - mem_before,
-        'GPU': jetson_after['gpu'],
-        'RAM': jetson_after['ram']
-    }
-    print(f"Quantized Encoder: Latency={enc_lat*1000:.2f}ms, FPS={enc_thr:.2f}, Throughput={enc_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
-    print(f"Quantized Depth: Latency={depth_lat*1000:.2f}ms, FPS={depth_thr:.2f}, Throughput={depth_thr:.2f}fps, Mem={mem_after-mem_before:.2f}MB, Jetson GPU={jetson_after['gpu']}%, Jetson RAM={jetson_after['ram']}MB")
-
-    if not JTOP_AVAILABLE:
-        print("Note: jtop is not installed. Jetson GPU/RAM metrics will not be shown. Install with 'pip install jetson-stats' on your Jetson device.")
-
-    # Plotting
+    # Visualization
     labels = list(metrics.keys())
     latency = [metrics[k]['Latency'] for k in labels]
     fps = [metrics[k]['FPS'] for k in labels]
     mem = [metrics[k]['Mem'] for k in labels]
     gpu = [metrics[k]['GPU'] if metrics[k]['GPU'] is not None else 0 for k in labels]
     ram = [metrics[k]['RAM'] if metrics[k]['RAM'] is not None else 0 for k in labels]
+    throughput = [metrics[k]['Throughput'] for k in labels]
 
-    plt.figure(figsize=(12, 8))
-    plt.subplot(2, 2, 1)
+    plt.figure(figsize=(16, 8))
+    plt.subplot(2, 3, 1)
     plt.bar(labels, latency, color=['blue', 'cyan', 'orange', 'red'])
     plt.ylabel('Latency (ms)')
     plt.title('Model Latency Comparison')
 
-    plt.subplot(2, 2, 2)
+    plt.subplot(2, 3, 2)
     plt.bar(labels, fps, color=['blue', 'cyan', 'orange', 'red'])
     plt.ylabel('FPS')
     plt.title('Model FPS Comparison')
 
-    plt.subplot(2, 2, 3)
+    plt.subplot(2, 3, 3)
+    plt.bar(labels, throughput, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('Throughput (fps)')
+    plt.title('Model Throughput Comparison')
+
+    plt.subplot(2, 3, 4)
     plt.bar(labels, mem, color=['blue', 'cyan', 'orange', 'red'])
     plt.ylabel('Memory Usage (MB)')
     plt.title('Model Memory Usage')
 
-    plt.subplot(2, 2, 4)
+    plt.subplot(2, 3, 5)
     plt.bar(labels, gpu, color=['blue', 'cyan', 'orange', 'red'])
-    plt.ylabel('GPU Usage (%)')
+    plt.ylabel('Jetson GPU Usage (%)')
     plt.title('Jetson GPU Usage')
 
+    plt.subplot(2, 3, 6)
+    plt.bar(labels, ram, color=['blue', 'cyan', 'orange', 'red'])
+    plt.ylabel('Jetson RAM Usage (MB)')
+    plt.title('Jetson RAM Usage')
+
     plt.tight_layout()
-    plt.savefig('model_comparison_metrics.png')
+    plt.savefig('onnxruntime_model_comparison.png')
     plt.show()
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     compare_models()
