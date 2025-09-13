@@ -75,83 +75,63 @@ def load_eigen_split(split_path):
         files = [line.strip() for line in f if line.strip()]
     return files
 
+def get_model_input_size(model_path):
+    """Retrieve the expected input size (height, width) from the ONNX model."""
+    session = ort.InferenceSession(model_path)
+    input_shape = session.get_inputs()[0].shape
+    if len(input_shape) == 4:  # BCHW format
+        height = input_shape[2] if input_shape[2] > 0 else 192
+        width = input_shape[3] if input_shape[3] > 0 else 640
+        return width, height
+    return 640, 192  # Default fallback
+
 def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
     print(f"Loading ONNX models: {encoder_onnx_path}, {depth_onnx_path}")
     encoder_session = ort.InferenceSession(encoder_onnx_path)
     depth_session = ort.InferenceSession(depth_onnx_path)
-    
-    # Get input/output info
-    encoder_input = encoder_session.get_inputs()[0]
-    encoder_input_name = encoder_input.name
-    encoder_input_shape = encoder_input.shape
-    
-    depth_input_names = [inp.name for inp in depth_session.get_inputs()]
-    
-    # Determine input size from encoder model
-    if len(encoder_input_shape) == 4:  # BCHW format
-        input_height = encoder_input_shape[2] if encoder_input_shape[2] > 0 else 192
-        input_width = encoder_input_shape[3] if encoder_input_shape[3] > 0 else 640
-    else:
-        # Default fallback
-        input_height, input_width = 192, 640
-    
+
+    # Get expected input size from the encoder model
+    input_width, input_height = get_model_input_size(encoder_onnx_path)
     print(f"Model input size: {input_width}x{input_height}")
-    
-    # Check if quantized model (expects MLFloat16)
+
+    encoder_input_name = encoder_session.get_inputs()[0].name
+    depth_input_names = [inp.name for inp in depth_session.get_inputs()]
+
     is_quantized = 'quantized' in encoder_onnx_path.lower()
-    
+
     times = []
     gpu_stats = []
-    
-    print(f"Processing {len(image_paths)} images...")
-    print(f"Encoder input: {encoder_input_name}, shape: {encoder_input_shape}")
-    print(f"Depth inputs: {depth_input_names}")
-    print(f"Is quantized model: {is_quantized}")
-    
+
     for i, img_path in enumerate(image_paths):
-        if i % 50 == 0:  # Progress indicator
+        if i % 50 == 0:
             print(f"Processed {i}/{len(image_paths)} images...")
-        
+
         try:
-            # Load image with correct dimensions
             img = load_image(img_path, resize=(input_width, input_height))
-            
-            # Convert to MLFloat16 for quantized models
             if is_quantized:
                 img = img.astype(np.float16)
-            
+
             start = time.time()
-            
-            # Run encoder
             enc_out = encoder_session.run(None, {encoder_input_name: img})
-            
-            # Prepare depth decoder inputs
-            if len(depth_input_names) == 1:
-                # Simple case: single input
-                depth_inputs = {depth_input_names[0]: enc_out[0]}
-            else:
-                # Multiple inputs: use all encoder outputs
-                depth_inputs = {}
-                for j, input_name in enumerate(depth_input_names):
-                    if j < len(enc_out):
-                        feature = enc_out[j]
-                        if is_quantized and feature.dtype != np.float16:
-                            feature = feature.astype(np.float16)
-                        depth_inputs[input_name] = feature
-            
-            # Run depth decoder
+
+            depth_inputs = {}
+            for j, input_name in enumerate(depth_input_names):
+                if j < len(enc_out):
+                    feature = enc_out[j]
+                    if is_quantized and feature.dtype != np.float16:
+                        feature = feature.astype(np.float16)
+                    depth_inputs[input_name] = feature
+
             depth_out = depth_session.run(None, depth_inputs)
-            
             end = time.time()
             times.append(end - start)
             stats = get_tegrastats()
             gpu_stats.append(stats)
-            
+
         except Exception as e:
-            if i < 5:  # Only print first few errors to avoid spam
-                print(f"Error processing {img_path}: {e}")
+            print(f"Error processing {img_path}: {e}")
             continue
-    
+
     print(f"Successfully processed {len(times)} images")
     return times, gpu_stats
 
