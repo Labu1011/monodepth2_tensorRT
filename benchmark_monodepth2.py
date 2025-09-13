@@ -74,23 +74,60 @@ def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
     print(f"Loading ONNX models: {encoder_onnx_path}, {depth_onnx_path}")
     encoder_session = ort.InferenceSession(encoder_onnx_path)
     depth_session = ort.InferenceSession(depth_onnx_path)
+    
+    # Get input/output info
+    encoder_input_name = encoder_session.get_inputs()[0].name
+    depth_input_names = [inp.name for inp in depth_session.get_inputs()]
+    
+    # Check if quantized model (expects MLFloat16)
+    is_quantized = 'quantized' in encoder_onnx_path.lower()
+    
     times = []
     gpu_stats = []
     
     print(f"Processing {len(image_paths)} images...")
+    print(f"Encoder input: {encoder_input_name}")
+    print(f"Depth inputs: {depth_input_names}")
+    print(f"Is quantized model: {is_quantized}")
+    
     for i, img_path in enumerate(image_paths):
         if i % 50 == 0:  # Progress indicator
             print(f"Processed {i}/{len(image_paths)} images...")
         
         try:
             img = load_image(img_path)
+            
+            # Convert to MLFloat16 for quantized models
+            if is_quantized:
+                img = img.astype(np.float16)
+            
             start = time.time()
-            enc_out = encoder_session.run(None, {'input': img})
-            depth_out = depth_session.run(None, {'input': enc_out[0]})
+            
+            # Run encoder
+            enc_out = encoder_session.run(None, {encoder_input_name: img})
+            
+            # Prepare depth decoder inputs
+            if len(depth_input_names) == 1:
+                # Simple case: single input
+                depth_inputs = {depth_input_names[0]: enc_out[0]}
+            else:
+                # Multiple inputs: use all encoder outputs
+                depth_inputs = {}
+                for j, input_name in enumerate(depth_input_names):
+                    if j < len(enc_out):
+                        feature = enc_out[j]
+                        if is_quantized and feature.dtype != np.float16:
+                            feature = feature.astype(np.float16)
+                        depth_inputs[input_name] = feature
+            
+            # Run depth decoder
+            depth_out = depth_session.run(None, depth_inputs)
+            
             end = time.time()
             times.append(end - start)
             stats = get_tegrastats()
             gpu_stats.append(stats)
+            
         except Exception as e:
             print(f"Error processing {img_path}: {e}")
             continue
@@ -185,6 +222,7 @@ def main():
     print("Example image paths:")
     for i, path in enumerate(image_paths[:5]):
         print(f"  {i+1}: {path}")
+        print(f"      Exists: {os.path.exists(path)}")
     
     # Run benchmarks
     results = {}
@@ -193,31 +231,52 @@ def main():
         print(f"Benchmarking {model_type} model")
         print(f"{'='*50}")
         
+        # Check if model files exist
+        encoder_path = MODELS[model_type]['encoder']
+        depth_path = MODELS[model_type]['depth']
+        
+        if not os.path.exists(encoder_path):
+            print(f"ERROR: Encoder model not found: {encoder_path}")
+            continue
+        if not os.path.exists(depth_path):
+            print(f"ERROR: Depth model not found: {depth_path}")
+            continue
+            
+        print(f"Using encoder: {encoder_path}")
+        print(f"Using depth: {depth_path}")
+        
         res = benchmark_model(model_type, image_paths)
         results[model_type] = res
         
         # Print results
         print(f"Results for {model_type}:")
         print(f"  Processed images: {res['processed_images']}/{res['total_images']}")
-        print(f"  FPS: {res['fps']:.2f}")
-        print(f"  Average latency: {res['latency']:.4f}s")
+        if res['processed_images'] > 0:
+            print(f"  FPS: {res['fps']:.2f}")
+            print(f"  Average latency: {res['latency']:.4f}s")
+        else:
+            print(f"  No successful inferences!")
         
         save_results(res, os.path.join(RESULTS_DIR, '{}_results.json'.format(model_type)))
     
-    # Plot comparison
-    plot_comparison(results, RESULTS_DIR)
-    print(f'\nBenchmarking complete. Results saved in {RESULTS_DIR}')
-    
-    # Print summary
-    print(f"\n{'='*50}")
-    print("BENCHMARK SUMMARY")
-    print(f"{'='*50}")
-    for model_type, res in results.items():
-        print(f"{model_type.upper()} MODEL:")
-        print(f"  FPS: {res['fps']:.2f}")
-        print(f"  Latency: {res['latency']:.4f}s")
-        print(f"  Images processed: {res['processed_images']}/{res['total_images']}")
-        print()
+    # Only plot if we have valid results
+    valid_results = {k: v for k, v in results.items() if v['processed_images'] > 0}
+    if valid_results:
+        plot_comparison(valid_results, RESULTS_DIR)
+        print(f'\nBenchmarking complete. Results saved in {RESULTS_DIR}')
+        
+        # Print summary
+        print(f"\n{'='*50}")
+        print("BENCHMARK SUMMARY")
+        print(f"{'='*50}")
+        for model_type, res in valid_results.items():
+            print(f"{model_type.upper()} MODEL:")
+            print(f"  FPS: {res['fps']:.2f}")
+            print(f"  Latency: {res['latency']:.4f}s")
+            print(f"  Images processed: {res['processed_images']}/{res['total_images']}")
+            print()
+    else:
+        print("\nNo valid results to plot. Check model files and data paths.")
 
 if __name__ == '__main__':
     main()
