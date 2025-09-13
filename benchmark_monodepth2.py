@@ -40,8 +40,13 @@ RESULTS_DIR = 'benchmark_results'
 BATCH_SIZE = 1
 
 # --- UTILS ---
-def load_image(path, resize=(640, 192)):
+def load_image(path, resize=None):
     img = Image.open(path).convert('RGB')
+    
+    # Use default Monodepth2 input size if not specified
+    if resize is None:
+        resize = (640, 192)  # Standard Monodepth2 size
+    
     img = img.resize(resize, Image.BILINEAR)
     img_np = np.array(img).astype(np.float32) / 255.0
     img_np = np.transpose(img_np, (2, 0, 1))  # CHW
@@ -76,8 +81,21 @@ def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
     depth_session = ort.InferenceSession(depth_onnx_path)
     
     # Get input/output info
-    encoder_input_name = encoder_session.get_inputs()[0].name
+    encoder_input = encoder_session.get_inputs()[0]
+    encoder_input_name = encoder_input.name
+    encoder_input_shape = encoder_input.shape
+    
     depth_input_names = [inp.name for inp in depth_session.get_inputs()]
+    
+    # Determine input size from encoder model
+    if len(encoder_input_shape) == 4:  # BCHW format
+        input_height = encoder_input_shape[2] if encoder_input_shape[2] > 0 else 192
+        input_width = encoder_input_shape[3] if encoder_input_shape[3] > 0 else 640
+    else:
+        # Default fallback
+        input_height, input_width = 192, 640
+    
+    print(f"Model input size: {input_width}x{input_height}")
     
     # Check if quantized model (expects MLFloat16)
     is_quantized = 'quantized' in encoder_onnx_path.lower()
@@ -86,7 +104,7 @@ def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
     gpu_stats = []
     
     print(f"Processing {len(image_paths)} images...")
-    print(f"Encoder input: {encoder_input_name}")
+    print(f"Encoder input: {encoder_input_name}, shape: {encoder_input_shape}")
     print(f"Depth inputs: {depth_input_names}")
     print(f"Is quantized model: {is_quantized}")
     
@@ -95,7 +113,8 @@ def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
             print(f"Processed {i}/{len(image_paths)} images...")
         
         try:
-            img = load_image(img_path)
+            # Load image with correct dimensions
+            img = load_image(img_path, resize=(input_width, input_height))
             
             # Convert to MLFloat16 for quantized models
             if is_quantized:
@@ -129,7 +148,8 @@ def run_inference(encoder_onnx_path, depth_onnx_path, image_paths):
             gpu_stats.append(stats)
             
         except Exception as e:
-            print(f"Error processing {img_path}: {e}")
+            if i < 5:  # Only print first few errors to avoid spam
+                print(f"Error processing {img_path}: {e}")
             continue
     
     print(f"Successfully processed {len(times)} images")
