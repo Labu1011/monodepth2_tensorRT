@@ -20,7 +20,9 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # For headless environments
 import matplotlib.pyplot as plt
-import onnxruntime as ort
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit
 from PIL import Image
 
 # --- CONFIG ---
@@ -70,16 +72,55 @@ def load_eigen_split(split_path):
         files = [line.strip() for line in f if line.strip()]
     return files
 
-def run_inference(encoder_path, depth_path, image_paths):
-    encoder_sess = ort.InferenceSession(encoder_path)
-    depth_sess = ort.InferenceSession(depth_path)
+def load_trt_engine(engine_path):
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    with open(engine_path, 'rb') as f, trt.Runtime(TRT_LOGGER) as runtime:
+        engine = runtime.deserialize_cuda_engine(f.read())
+    return engine
+
+def allocate_buffers(engine):
+    inputs = []
+    outputs = []
+    bindings = []
+    stream = cuda.Stream()
+    for binding in engine:
+        size = trt.volume(engine.get_binding_shape(binding)) * engine.max_batch_size
+        dtype = trt.nptype(engine.get_binding_dtype(binding))
+        host_mem = cuda.pagelocked_empty(size, dtype)
+        device_mem = cuda.mem_alloc(host_mem.nbytes)
+        bindings.append(int(device_mem))
+        if engine.binding_is_input(binding):
+            inputs.append({'host': host_mem, 'device': device_mem})
+        else:
+            outputs.append({'host': host_mem, 'device': device_mem})
+    return inputs, outputs, bindings, stream
+
+def trt_infer(context, bindings, inputs, outputs, stream):
+    # Transfer input data to device
+    cuda.memcpy_htod_async(inputs[0]['device'], inputs[0]['host'], stream)
+    # Run inference
+    context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
+    # Transfer predictions back
+    cuda.memcpy_dtoh_async(outputs[0]['host'], outputs[0]['device'], stream)
+    stream.synchronize()
+    return outputs[0]['host']
+
+def run_inference(encoder_engine_path, depth_engine_path, image_paths):
+    encoder_engine = load_trt_engine(encoder_engine_path)
+    depth_engine = load_trt_engine(depth_engine_path)
+    encoder_context = encoder_engine.create_execution_context()
+    depth_context = depth_engine.create_execution_context()
+    encoder_inputs, encoder_outputs, encoder_bindings, encoder_stream = allocate_buffers(encoder_engine)
+    depth_inputs, depth_outputs, depth_bindings, depth_stream = allocate_buffers(depth_engine)
     times = []
     gpu_stats = []
     for img_path in image_paths:
         img = load_image(img_path)
+        encoder_inputs[0]['host'][:] = img.flatten()
         start = time.time()
-        enc_out = encoder_sess.run(None, {'input': img})
-        depth_out = depth_sess.run(None, {'input': enc_out[0]})
+        enc_out = trt_infer(encoder_context, encoder_bindings, encoder_inputs, encoder_outputs, encoder_stream)
+        depth_inputs[0]['host'][:] = enc_out.flatten()
+        depth_out = trt_infer(depth_context, depth_bindings, depth_inputs, depth_outputs, depth_stream)
         end = time.time()
         times.append(end - start)
         stats = get_tegrastats()
